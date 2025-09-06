@@ -1,10 +1,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
-	"os/signal"
+	"time"
 
 	"github.com/IBM/sarama"
 )
@@ -229,47 +230,143 @@ func main() {
 
 	// 多分区消费指定多分区
 	// 配置消费者
-	config := sarama.NewConfig()
-	config.Consumer.Return.Errors = true
+	// config := sarama.NewConfig()
+	// config.Consumer.Return.Errors = true
 
-	// 创建消费者实例
-	consumer, err := sarama.NewConsumer([]string{"192.168.5.128:29092"}, config)
-	if err != nil {
-		log.Fatalf("Error creating consumer: %v", err)
-	}
-	defer func() {
-		if err := consumer.Close(); err != nil {
-			log.Fatalf("Error closing consumer: %v", err)
-		}
-	}()
+	// // 创建消费者实例
+	// consumer, err := sarama.NewConsumer([]string{"192.168.5.128:29092"}, config)
+	// if err != nil {
+	// 	log.Fatalf("Error creating consumer: %v", err)
+	// }
+	// defer func() {
+	// 	if err := consumer.Close(); err != nil {
+	// 		log.Fatalf("Error closing consumer: %v", err)
+	// 	}
+	// }()
 
+	// topic := "test-multi-partition"
+	// // 指定要消费的分区号
+	// partitionsToConsume := []int32{0, 2} // 指定要消费的分区列表
+	// // 指定起始偏移量，sarama.OffsetOldest 从最旧的消息开始
+
+	// for _, partition := range partitionsToConsume {
+	// 	// 为每个分区创建消费者
+	// 	pc, err := consumer.ConsumePartition(topic, partition, sarama.OffsetOldest)
+	// 	if err != nil {
+	// 		log.Printf("Failed to consume partition %d: %v", partition, err)
+	// 		continue
+	// 	}
+	// 	defer pc.Close()
+
+	// 	// 为每个分区启动一个消费goroutine
+	// 	go func(pc sarama.PartitionConsumer, p int32) {
+	// 		for msg := range pc.Messages() {
+	// 			fmt.Printf("Partition %d: Offset %d | Key: %s | Value: %s\n",
+	// 				p, msg.Offset, string(msg.Key), string(msg.Value))
+	// 		}
+	// 	}(pc, partition)
+	// }
+
+	// // 等待中断信号以退出
+	// sigchan := make(chan os.Signal, 1)
+	// signal.Notify(sigchan, os.Interrupt)
+	// <-sigchan
+	// fmt.Println("Interrupt is detected, shutting down...")
+
+	// 带重试逻辑的异常消息处理的发送者
+	// Kafka Broker 地址
+	brokers := []string{"192.168.5.128:29092"}
 	topic := "test-multi-partition"
-	// 指定要消费的分区号
-	partitionsToConsume := []int32{0, 2} // 指定要消费的分区列表
-	// 指定起始偏移量，sarama.OffsetOldest 从最旧的消息开始
 
-	for _, partition := range partitionsToConsume {
-		// 为每个分区创建消费者
-		pc, err := consumer.ConsumePartition(topic, partition, sarama.OffsetOldest)
-		if err != nil {
-			log.Printf("Failed to consume partition %d: %v", partition, err)
-			continue
-		}
-		defer pc.Close()
+	// 创建生产者
+	producer, err := newProducer(brokers)
+	if err != nil {
+		log.Fatalf("Failed to create producer: %v", err)
+	}
+	defer producer.Close()
 
-		// 为每个分区启动一个消费goroutine
-		go func(pc sarama.PartitionConsumer, p int32) {
-			for msg := range pc.Messages() {
-				fmt.Printf("Partition %d: Offset %d | Key: %s | Value: %s\n",
-					p, msg.Offset, string(msg.Key), string(msg.Value))
-			}
-		}(pc, partition)
+	// 示例消息
+	msg := &sarama.ProducerMessage{
+		Topic: topic,
+		Key:   sarama.StringEncoder("key-1"),
+		Value: sarama.StringEncoder("Hello, Kafka!"),
 	}
 
-	// 等待中断信号以退出
-	sigchan := make(chan os.Signal, 1)
-	signal.Notify(sigchan, os.Interrupt)
-	<-sigchan
-	fmt.Println("Interrupt is detected, shutting down...")
+	// 自定义重试逻辑，最大重试 3 次
+	err = retryMessage(producer, msg, 3)
+	if err != nil {
+		log.Printf("Failed to send message after retries: %v", err)
+	} else {
+		log.Println("Message sent successfully")
+	}
 
+}
+
+// 配置 Kafka 生产者
+func newProducer(brokers []string) (sarama.AsyncProducer, error) {
+	config := sarama.NewConfig()
+	config.Producer.Return.Successes = true                // 启用成功回调
+	config.Producer.Return.Errors = true                   // 启用错误回调
+	config.Producer.Retry.Max = 3                          // 内置重试次数
+	config.Producer.Retry.Backoff = 100 * time.Millisecond // 重试间隔
+	config.Producer.RequiredAcks = sarama.WaitForAll       // 等同于 acks=-1
+	//	控制每个 Kafka Broker 连接上允许的最大未完成请求数（in-flight requests）。
+	// 	默认值：5。
+	// 	设置为 1 可确保消息按顺序发送，避免重试导致乱序，但会降低吞吐量。
+	// 	较高的值（如默认的 5）允许更多并发请求，提升吞吐量，但可能导致消息乱序。
+	// 与幂等性的关系：当启用 Producer.Idempotent = true 时，必须设置 Net.MaxOpenRequests = 1，以保证幂等性生效（避免重复消息）。
+	config.Producer.Idempotent = true                       // 启用幂等性
+	config.Net.MaxOpenRequests = 1                          // 确保顺序性（更正后的参数）
+	config.Producer.Partitioner = sarama.NewHashPartitioner // 使用哈希分区器
+
+	producer, err := sarama.NewAsyncProducer(brokers, config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to start producer: %w", err)
+	}
+	return producer, nil
+}
+
+// 模拟写入死信队列（这里写入本地文件）
+func writeToDeadLetterQueue(msg *sarama.ProducerMessage, err error) {
+	file, _ := os.OpenFile("dead_letter_queue.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	defer file.Close()
+	logEntry := fmt.Sprintf("Failed message: Topic=%s, Key=%s, Value=%s, Error=%v\n",
+		msg.Topic, string(msg.Key.(sarama.StringEncoder)), string(msg.Value.(sarama.StringEncoder)), err)
+	file.WriteString(logEntry)
+}
+
+// 自定义重试逻辑
+func retryMessage(producer sarama.AsyncProducer, msg *sarama.ProducerMessage, maxRetries int) error {
+	ctx := context.Background()
+	attempt := 0
+	baseDelay := 200 * time.Millisecond // 基础重试间隔
+
+	for attempt < maxRetries {
+		attempt++
+		log.Printf("Attempt %d to send message to topic %s", attempt, msg.Topic)
+
+		// 异步发送消息
+		producer.Input() <- msg
+
+		// 等待发送结果
+		select {
+		case success := <-producer.Successes():
+			log.Printf("Message sent successfully to partition %d, offset %d", success.Partition, success.Offset)
+			return nil
+		case err := <-producer.Errors():
+			log.Printf("Failed to send message: %v", err.Err)
+			if attempt == maxRetries {
+				// 达到最大重试次数，写入死信队列
+				writeToDeadLetterQueue(msg, err.Err)
+				return fmt.Errorf("max retries reached: %w", err.Err)
+			}
+			// 指数退避
+			delay := baseDelay * time.Duration(1<<attempt) // 200ms, 400ms, 800ms...
+			log.Printf("Retrying after %v", delay)
+			time.Sleep(delay)
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
 }
