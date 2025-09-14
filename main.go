@@ -273,33 +273,171 @@ func main() {
 	// <-sigchan
 	// fmt.Println("Interrupt is detected, shutting down...")
 
-	// 带重试逻辑的异常消息处理的发送者
+	// 生产者带重试逻辑的异常消息处理的发送者
 	// Kafka Broker 地址
-	brokers := []string{"192.168.5.128:29092"}
-	topic := "test-multi-partition"
+	// brokers := []string{"192.168.5.128:29092"}
+	// topic := "test-multi-partition"
 
-	// 创建生产者
-	producer, err := newProducer(brokers)
-	if err != nil {
-		log.Fatalf("Failed to create producer: %v", err)
+	// // 创建生产者
+	// producer, err := newProducer(brokers)
+	// if err != nil {
+	// 	log.Fatalf("Failed to create producer: %v", err)
+	// }
+	// defer producer.Close()
+
+	// // 示例消息
+	// msg := &sarama.ProducerMessage{
+	// 	Topic: topic,
+	// 	Key:   sarama.StringEncoder("key-1"),
+	// 	Value: sarama.StringEncoder("Hello, Kafka!"),
+	// }
+
+	// // 生产者自定义重试逻辑，最大重试 3 次
+	// err = retryMessage(producer, msg, 3)
+	// if err != nil {
+	// 	log.Printf("Failed to send message after retries: %v", err)
+	// } else {
+	// 	log.Println("Message sent successfully")
+	// }
+
+	// 消费者组及手动ack处理- 可以启动多个<= broker数量,多个消费者组成 consumerGroup
+	// Kafka 配置
+	// config := sarama.NewConfig()
+	// config.Consumer.Group.Rebalance.Strategy = sarama.BalanceStrategyRoundRobin // 轮询分配策略
+	// config.Consumer.Offsets.Initial = sarama.OffsetOldest                       // 从最早的消息开始消费
+	// config.Consumer.Offsets.AutoCommit.Enable = false                           // 禁用自动提交
+	// config.Version = sarama.V2_0_0_0
+	// topic := "test-multi-partition" // Kafka 版本
+	// groupName := "my-group1"        // 分组名
+
+	// // 创建消费者组
+	// group, err := sarama.NewConsumerGroup([]string{"192.168.5.128:29092"}, groupName, config)
+	// if err != nil {
+	// 	log.Fatalf("创建消费者组失败: %v", err)
+	// }
+	// defer group.Close()
+
+	// // 模拟消息处理函数
+	// processor := func(message *sarama.ConsumerMessage) error {
+	// 	fmt.Printf("处理消息: %s\n", string(message.Value))
+	// 	time.Sleep(500 * time.Millisecond) // 模拟处理耗时
+	// 	return nil
+	// }
+
+	// // 消费者组处理逻辑
+	// handler := ConsumerGroupHandler{processor: processor}
+	// ctx, cancel := context.WithCancel(context.Background())
+	// wg := &sync.WaitGroup{}
+	// wg.Add(1)
+
+	// go func() {
+	// 	defer wg.Done()
+	// 	for {
+	// 		// 启动消费者组，订阅 Topic
+	// 		err := group.Consume(ctx, []string{topic}, handler)
+	// 		if err != nil {
+	// 			log.Printf("消费者组运行错误: %v", err)
+	// 		}
+	// 		if ctx.Err() != nil {
+	// 			return
+	// 		}
+	// 	}
+	// }()
+
+	// // 捕获中断信号以优雅退出
+	// signals := make(chan os.Signal, 1)
+	// signal.Notify(signals, os.Interrupt)
+	// <-signals
+	// fmt.Println("收到中断信号，关闭消费者组...")
+	// cancel()
+	// wg.Wait()
+	// fmt.Println("消费者组已关闭")
+
+	// Day 14: 主题管理：动态创建/删除、配置参数
+	// brokers := []string{"192.168.5.128:29092"}
+	// topic := "test-multi-partition1"
+
+	// // 创建主题（3 个分区，1 个副本，保留时间 1 小时）
+	// err := createTopic(brokers, topic, 3, 1, 3600*1000)
+	// if err != nil {
+	// 	log.Fatalf("创建主题失败: %v", err)
+	// }
+
+	// // 等待几秒以确保主题创建完成
+	// time.Sleep(2 * time.Second)
+
+	// // 修改主题保留时间为 2 小时
+	// err = alterTopicConfig(brokers, topic, 2*3600*1000)
+	// if err != nil {
+	// 	log.Fatalf("修改主题配置失败: %v", err)
+	// }
+
+	// // 等待几秒以观察效果
+	// time.Sleep(2 * time.Second)
+
+	// // 删除主题
+	// err = deleteTopic(brokers, topic)
+	// if err != nil {
+	// 	log.Fatalf("删除主题失败: %v", err)
+	// }
+
+}
+
+// ConsumerGroupHandler 实现 sarama.ConsumerGroupHandler 接口
+type ConsumerGroupHandler struct {
+	processor func(message *sarama.ConsumerMessage) error
+}
+
+func (h ConsumerGroupHandler) Setup(session sarama.ConsumerGroupSession) error {
+	fmt.Printf("再平衡开始，分配的分区: %v\n", session.Claims())
+	return nil
+}
+
+func (h ConsumerGroupHandler) Cleanup(session sarama.ConsumerGroupSession) error {
+	fmt.Println("再平衡完成，提交偏移量并清理资源")
+	session.Commit()
+	return nil
+}
+
+func (h ConsumerGroupHandler) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+	// 启动异步提交 goroutine
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// 异步提交偏移量
+	go func() {
+		ticker := time.NewTicker(5 * time.Second) // 每 5 秒提交一次
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				session.Commit()
+				fmt.Println("异步提交偏移量成功")
+			case <-ctx.Done():
+				session.Commit()
+				fmt.Println("异步提交器退出，提交最后一次偏移量")
+				return
+			}
+		}
+	}()
+
+	// 消费分配到的分区消息
+	for message := range claim.Messages() {
+		fmt.Printf("收到消息: Topic=%s, Partition=%d, Offset=%d, Key=%s, Value=%s\n",
+			message.Topic, message.Partition, message.Offset, string(message.Key), string(message.Value))
+
+		// 模拟消息处理
+		if h.processor != nil {
+			if err := h.processor(message); err != nil {
+				log.Printf("消息处理失败: %v", err)
+				continue
+			}
+		}
+
+		// 手动标记偏移量
+		session.MarkMessage(message, "")
 	}
-	defer producer.Close()
-
-	// 示例消息
-	msg := &sarama.ProducerMessage{
-		Topic: topic,
-		Key:   sarama.StringEncoder("key-1"),
-		Value: sarama.StringEncoder("Hello, Kafka!"),
-	}
-
-	// 自定义重试逻辑，最大重试 3 次
-	err = retryMessage(producer, msg, 3)
-	if err != nil {
-		log.Printf("Failed to send message after retries: %v", err)
-	} else {
-		log.Println("Message sent successfully")
-	}
-
+	return nil
 }
 
 // 配置 Kafka 生产者
@@ -369,4 +507,83 @@ func retryMessage(producer sarama.AsyncProducer, msg *sarama.ProducerMessage, ma
 		}
 	}
 	return nil
+}
+
+// createTopic 动态创建主题
+func createTopic(brokers []string, topic string, partitions int32, replicationFactor int16, retentionMs int64) error {
+	// 配置 Admin 客户端
+	config := sarama.NewConfig()
+	config.Version = sarama.V2_0_0_0 // 设置 Kafka 协议版本
+
+	admin, err := sarama.NewClusterAdmin(brokers, config)
+	if err != nil {
+		return fmt.Errorf("创建 Admin 客户端失败: %v", err)
+	}
+	defer admin.Close()
+
+	// 主题配置
+	topicDetail := &sarama.TopicDetail{
+		NumPartitions:     partitions,        // 分区数
+		ReplicationFactor: replicationFactor, // 副本数
+		ConfigEntries: map[string]*string{
+			"retention.ms": toStringPtr(retentionMs), // 设置保留时间（毫秒）
+		},
+	}
+
+	// 创建主题
+	err = admin.CreateTopic(topic, topicDetail, false)
+	if err != nil {
+		return fmt.Errorf("创建主题 %s 失败: %v", topic, err)
+	}
+	fmt.Printf("主题 %s 创建成功，分区数: %d, 副本数: %d, 保留时间: %d ms\n", topic, partitions, replicationFactor, retentionMs)
+	return nil
+}
+
+// deleteTopic 动态删除主题
+func deleteTopic(brokers []string, topic string) error {
+	config := sarama.NewConfig()
+	config.Version = sarama.V2_0_0_0
+
+	admin, err := sarama.NewClusterAdmin(brokers, config)
+	if err != nil {
+		return fmt.Errorf("创建 Admin 客户端失败: %v", err)
+	}
+	defer admin.Close()
+
+	// 删除主题
+	err = admin.DeleteTopic(topic)
+	if err != nil {
+		return fmt.Errorf("删除主题 %s 失败: %v", topic, err)
+	}
+	fmt.Printf("主题 %s 删除成功\n", topic)
+	return nil
+}
+
+// alterTopicConfig 修改主题配置（如 retention.ms）
+func alterTopicConfig(brokers []string, topic string, retentionMs int64) error {
+	config := sarama.NewConfig()
+	config.Version = sarama.V2_0_0_0
+
+	admin, err := sarama.NewClusterAdmin(brokers, config)
+	if err != nil {
+		return fmt.Errorf("创建 Admin 客户端失败: %v", err)
+	}
+	defer admin.Close()
+
+	// 修改主题配置
+	configEntries := map[string]*string{
+		"retention.ms": toStringPtr(retentionMs),
+	}
+	err = admin.AlterConfig(sarama.TopicResource, topic, configEntries, false)
+	if err != nil {
+		return fmt.Errorf("修改主题 %s 配置失败: %v", topic, err)
+	}
+	fmt.Printf("主题 %s 配置更新成功，保留时间: %d ms\n", topic, retentionMs)
+	return nil
+}
+
+// toStringPtr 辅助函数，将 int64 转换为 *string
+func toStringPtr(value int64) *string {
+	str := fmt.Sprintf("%d", value)
+	return &str
 }
