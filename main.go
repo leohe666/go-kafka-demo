@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"go-kafka/kafka/producer"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/IBM/sarama"
@@ -381,6 +384,33 @@ func main() {
 	// 	log.Fatalf("删除主题失败: %v", err)
 	// }
 
+	// 完整的生产者,带重试,错误处理,死信处理
+	// 创建生产者配置
+	config := producer.NewConfig([]string{"192.168.5.128:29092"})
+
+	// 自定义配置参数
+	config.DeadLetterTopic = "my-dead-letter-topic"
+	config.MaxRetries = 5
+	config.NumWorkers = 3
+	config.RetryQueueSize = 200
+
+	// 创建生产者实例
+	kafkaProducer, err := producer.NewProducer(config)
+	if err != nil {
+		log.Fatalf("创建 Kafka 生产者失败: %v", err)
+	}
+	defer kafkaProducer.Close()
+
+	// 发送测试消息
+	go sendMessages(kafkaProducer.Input())
+
+	// 优雅退出
+	sigterm := make(chan os.Signal, 1)
+	signal.Notify(sigterm, syscall.SIGINT, syscall.SIGTERM)
+	<-sigterm
+
+	fmt.Println("正在优雅退出...")
+
 }
 
 // ConsumerGroupHandler 实现 sarama.ConsumerGroupHandler 接口
@@ -586,4 +616,20 @@ func alterTopicConfig(brokers []string, topic string, retentionMs int64) error {
 func toStringPtr(value int64) *string {
 	str := fmt.Sprintf("%d", value)
 	return &str
+}
+
+// sendMessages 发送测试消息
+func sendMessages(input chan<- *sarama.ProducerMessage) {
+	topic := "test-multi-partition"
+	for i := 0; i < 20; i++ {
+		value := fmt.Sprintf("原始消息 %d", i)
+		msg := &sarama.ProducerMessage{
+			Topic: topic,
+			Key:   sarama.StringEncoder(fmt.Sprintf("key-%d", i)),
+			Value: sarama.StringEncoder(value),
+		}
+
+		input <- msg
+		log.Printf("已发送消息: %v", msg)
+	}
 }
